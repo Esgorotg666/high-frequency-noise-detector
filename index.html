@@ -180,18 +180,20 @@ let dataArray = null;
 let isListening = false;
 let animationId = null;
 
-const NUM_BINS = 36;
+const NUM_BINS = 72; // 5 degree resolution for better accuracy
 let directionLevels = new Array(NUM_BINS).fill(0);
 let maxLevelEver = 1;
 let currentHeading = 0;
+let smoothedHeading = 0;
 let strongestBin = -1;
+let headingInitialized = false;
 
 let lastBeepTime = 0;
 const BEEP_COOLDOWN = 600;
 
 let wasAboveThreshold = false;
 let lastLogTime = 0;
-const LOG_COOLDOWN = 1500; // minimum time between history entries
+const LOG_COOLDOWN = 1500;
 
 let alertHistory = JSON.parse(localStorage.getItem('hfAlertHistory') || '[]');
 
@@ -245,11 +247,25 @@ clearHistoryBtn.onclick = () => {
 
 function headingToBin(heading) {
   let h = ((heading % 360) + 360) % 360;
-  return Math.floor(h / 10) % NUM_BINS;
+  return Math.floor(h / 5) % NUM_BINS;
 }
 
 function binToHeading(bin) {
-  return bin * 10 + 5;
+  return bin * 5 + 2.5;
+}
+
+function smoothHeading(newHeading) {
+  if (!headingInitialized) {
+    smoothedHeading = newHeading;
+    headingInitialized = true;
+    return smoothedHeading;
+  }
+  // Circular smoothing to handle 0/360 wrap
+  let diff = newHeading - smoothedHeading;
+  if (diff > 180) diff -= 360;
+  if (diff < -180) diff += 360;
+  smoothedHeading = (smoothedHeading + diff * 0.15 + 360) % 360;
+  return smoothedHeading;
 }
 
 function playBeep() {
@@ -290,30 +306,30 @@ function drawCompass() {
   for (let i = 0; i < NUM_BINS; i++) {
     const level = directionLevels[i];
     const intensity = Math.min(1, level / Math.max(maxLevelEver, 1));
-    if (intensity < 0.05) continue;
+    if (intensity < 0.08) continue;
 
-    const angle = (i * 10 - 90) * Math.PI / 180;
+    const angle = (i * 5 - 90) * Math.PI / 180;
     const len = r * intensity;
 
     ctx.beginPath();
     ctx.moveTo(cx, cy);
     ctx.lineTo(cx + Math.cos(angle) * len, cy + Math.sin(angle) * len);
-    ctx.strokeStyle = `rgba(239, 68, 68, ${0.4 + intensity * 0.6})`;
-    ctx.lineWidth = 8;
+    ctx.strokeStyle = `rgba(239, 68, 68, ${0.35 + intensity * 0.65})`;
+    ctx.lineWidth = 6;
     ctx.stroke();
   }
 
-  if (strongestBin >= 0) {
-    const angle = (strongestBin * 10 - 90) * Math.PI / 180;
+  if (strongestBin >= 0 && maxLevelEver > 10) {
+    const angle = (strongestBin * 5 - 90) * Math.PI / 180;
     ctx.beginPath();
     ctx.moveTo(cx, cy);
     ctx.lineTo(cx + Math.cos(angle) * r * 0.95, cy + Math.sin(angle) * r * 0.95);
     ctx.strokeStyle = '#fbbf24';
-    ctx.lineWidth = 4;
+    ctx.lineWidth = 5;
     ctx.stroke();
 
     ctx.beginPath();
-    ctx.arc(cx + Math.cos(angle) * r * 0.85, cy + Math.sin(angle) * r * 0.85, 6, 0, Math.PI * 2);
+    ctx.arc(cx + Math.cos(angle) * r * 0.85, cy + Math.sin(angle) * r * 0.85, 7, 0, Math.PI * 2);
     ctx.fillStyle = '#fbbf24';
     ctx.fill();
   }
@@ -333,11 +349,11 @@ function drawCompass() {
 }
 
 function updateDirectionLabel() {
-  if (strongestBin < 0) {
+  if (strongestBin < 0 || maxLevelEver < 10) {
     directionLabel.textContent = 'Rotate phone to scan';
     return;
   }
-  const deg = binToHeading(strongestBin);
+  const deg = Math.round(binToHeading(strongestBin));
   let dir = 'N';
   if (deg >= 22.5 && deg < 67.5) dir = 'NE';
   else if (deg >= 67.5 && deg < 112.5) dir = 'E';
@@ -350,8 +366,8 @@ function updateDirectionLabel() {
 }
 
 function handleOrientation(e) {
-  let heading = e.webkitCompassHeading != null ? e.webkitCompassHeading : (360 - (e.alpha || 0));
-  currentHeading = heading;
+  let raw = e.webkitCompassHeading != null ? e.webkitCompassHeading : (360 - (e.alpha || 0));
+  currentHeading = smoothHeading(raw);
 }
 
 async function requestOrientationPermission() {
@@ -398,6 +414,7 @@ async function startListening() {
     directionLevels = new Array(NUM_BINS).fill(0);
     maxLevelEver = 1;
     strongestBin = -1;
+    headingInitialized = false;
     lastBeepTime = 0;
     wasAboveThreshold = false;
 
@@ -453,8 +470,14 @@ function detect() {
   meterBar.style.width = meterPercent + '%';
 
   const bin = headingToBin(currentHeading);
-  directionLevels[bin] = Math.max(directionLevels[bin] * 0.92, maxHigh);
+  // Faster decay so recent readings dominate for better accuracy
+  directionLevels[bin] = Math.max(directionLevels[bin] * 0.85, maxHigh);
   if (maxHigh > maxLevelEver) maxLevelEver = maxHigh;
+
+  // Mild decay on all bins so old data fades
+  for (let i = 0; i < NUM_BINS; i++) {
+    if (i !== bin) directionLevels[i] *= 0.995;
+  }
 
   let best = 0;
   strongestBin = 0;
@@ -475,7 +498,6 @@ function detect() {
     if (navigator.vibrate) navigator.vibrate(80);
     playBeep();
 
-    // Log on rising edge or after cooldown while still above
     if (!wasAboveThreshold || (Date.now() - lastLogTime >= LOG_COOLDOWN)) {
       addAlert(maxHigh, currentHeading);
     }
