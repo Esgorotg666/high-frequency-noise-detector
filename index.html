@@ -36,6 +36,12 @@
     margin: 8px 0;
   }
   button.listening { background: #ef4444; color: #fff; }
+  button.secondary {
+    background: #374151;
+    color: #fff;
+    padding: 10px;
+    font-size: 0.95rem;
+  }
   #status {
     margin: 8px 0;
     font-size: 0.95rem;
@@ -96,11 +102,34 @@
     color: #888;
     margin: 4px 0 8px;
   }
+  #history {
+    background: #1a1a1a;
+    border-radius: 12px;
+    padding: 12px;
+    margin: 12px 0;
+    text-align: left;
+    max-height: 280px;
+    overflow-y: auto;
+  }
+  #history h2 {
+    margin: 0 0 8px;
+    font-size: 1.1rem;
+    text-align: center;
+  }
+  .history-item {
+    padding: 8px 0;
+    border-bottom: 1px solid #333;
+    font-size: 0.9rem;
+  }
+  .history-item:last-child { border-bottom: none; }
+  .history-time { color: #fbbf24; font-weight: 600; }
+  .history-details { color: #ccc; }
+  .empty { color: #666; text-align: center; padding: 12px; }
 </style>
 </head>
 <body>
   <h1>High Frequency Direction Finder</h1>
-  <p class="instructions">Slowly rotate your phone in a full circle while listening. The compass shows where the noise is strongest. Beeps when high-frequency noise is detected.</p>
+  <p class="instructions">Slowly rotate your phone in a full circle while listening. The compass shows where the noise is strongest. Beeps and logs every detection.</p>
 
   <div class="controls">
     <label>Threshold Frequency: <span id="freqLabel">8000</span> Hz</label>
@@ -118,6 +147,12 @@
   <button id="startBtn">Start Listening</button>
   <p id="status">Tap Start → allow mic + motion/orientation</p>
 
+  <div id="history">
+    <h2>Alert History</h2>
+    <div id="historyList"></div>
+    <button class="secondary" id="clearHistory">Clear History</button>
+  </div>
+
   <div id="alert">⚠️ HIGH FREQUENCY<br>NOISE DETECTED</div>
 
 <script>
@@ -131,6 +166,8 @@ const alertDiv = document.getElementById('alert');
 const meterBar = document.getElementById('meterBar');
 const compassCanvas = document.getElementById('compassCanvas');
 const directionLabel = document.getElementById('directionLabel');
+const historyList = document.getElementById('historyList');
+const clearHistoryBtn = document.getElementById('clearHistory');
 const ctx = compassCanvas.getContext('2d');
 
 freqSlider.oninput = () => freqLabel.textContent = freqSlider.value;
@@ -143,16 +180,68 @@ let dataArray = null;
 let isListening = false;
 let animationId = null;
 
-// Direction finding data
 const NUM_BINS = 36;
 let directionLevels = new Array(NUM_BINS).fill(0);
 let maxLevelEver = 1;
 let currentHeading = 0;
 let strongestBin = -1;
 
-// Beep cooldown so it doesn't spam
 let lastBeepTime = 0;
-const BEEP_COOLDOWN = 600; // ms between beeps
+const BEEP_COOLDOWN = 600;
+
+let wasAboveThreshold = false;
+let lastLogTime = 0;
+const LOG_COOLDOWN = 1500; // minimum time between history entries
+
+let alertHistory = JSON.parse(localStorage.getItem('hfAlertHistory') || '[]');
+
+function saveHistory() {
+  localStorage.setItem('hfAlertHistory', JSON.stringify(alertHistory.slice(0, 100)));
+}
+
+function renderHistory() {
+  if (alertHistory.length === 0) {
+    historyList.innerHTML = '<div class="empty">No alerts yet</div>';
+    return;
+  }
+  historyList.innerHTML = alertHistory.map(item => `
+    <div class="history-item">
+      <div class="history-time">${item.time}</div>
+      <div class="history-details">Peak: ${item.peak} | Dir: ${item.direction || 'N/A'} | Heading: ${item.heading}°</div>
+    </div>
+  `).join('');
+}
+
+function addAlert(peak, heading) {
+  const now = Date.now();
+  if (now - lastLogTime < LOG_COOLDOWN) return;
+  lastLogTime = now;
+
+  let dir = 'N/A';
+  if (strongestBin >= 0) {
+    const deg = binToHeading(strongestBin);
+    if (deg >= 22.5 && deg < 67.5) dir = 'NE';
+    else if (deg >= 67.5 && deg < 112.5) dir = 'E';
+    else if (deg >= 112.5 && deg < 157.5) dir = 'SE';
+    else if (deg >= 157.5 && deg < 202.5) dir = 'S';
+    else if (deg >= 202.5 && deg < 247.5) dir = 'SW';
+    else if (deg >= 247.5 && deg < 292.5) dir = 'W';
+    else if (deg >= 292.5 && deg < 337.5) dir = 'NW';
+    else dir = 'N';
+  }
+
+  const timeStr = new Date().toLocaleTimeString();
+  alertHistory.unshift({ time: timeStr, peak, direction: dir, heading: Math.round(heading) });
+  if (alertHistory.length > 100) alertHistory.pop();
+  saveHistory();
+  renderHistory();
+}
+
+clearHistoryBtn.onclick = () => {
+  alertHistory = [];
+  saveHistory();
+  renderHistory();
+};
 
 function headingToBin(heading) {
   let h = ((heading % 360) + 360) % 360;
@@ -310,6 +399,7 @@ async function startListening() {
     maxLevelEver = 1;
     strongestBin = -1;
     lastBeepTime = 0;
+    wasAboveThreshold = false;
 
     isListening = true;
     startBtn.textContent = 'Stop Listening';
@@ -378,18 +468,28 @@ function detect() {
   drawCompass();
   updateDirectionLabel();
 
-  if (maxHigh > thresholdAmp) {
+  const isAbove = maxHigh > thresholdAmp;
+
+  if (isAbove) {
     alertDiv.classList.add('show');
     if (navigator.vibrate) navigator.vibrate(80);
     playBeep();
+
+    // Log on rising edge or after cooldown while still above
+    if (!wasAboveThreshold || (Date.now() - lastLogTime >= LOG_COOLDOWN)) {
+      addAlert(maxHigh, currentHeading);
+    }
   } else {
     alertDiv.classList.remove('show');
   }
+
+  wasAboveThreshold = isAbove;
 
   statusEl.textContent = `Peak: ${maxHigh} | Heading: ${Math.round(currentHeading)}°`;
   animationId = requestAnimationFrame(detect);
 }
 
+renderHistory();
 drawCompass();
 </script>
 </body>
