@@ -100,7 +100,7 @@
 </head>
 <body>
   <h1>High Frequency Direction Finder</h1>
-  <p class="instructions">Slowly rotate your phone in a full circle while listening. The compass shows where the noise is strongest.</p>
+  <p class="instructions">Slowly rotate your phone in a full circle while listening. The compass shows where the noise is strongest. Beeps when high-frequency noise is detected.</p>
 
   <div class="controls">
     <label>Threshold Frequency: <span id="freqLabel">8000</span> Hz</label>
@@ -144,11 +144,15 @@ let isListening = false;
 let animationId = null;
 
 // Direction finding data
-const NUM_BINS = 36; // 10 degree bins
+const NUM_BINS = 36;
 let directionLevels = new Array(NUM_BINS).fill(0);
 let maxLevelEver = 1;
 let currentHeading = 0;
 let strongestBin = -1;
+
+// Beep cooldown so it doesn't spam
+let lastBeepTime = 0;
+const BEEP_COOLDOWN = 600; // ms between beeps
 
 function headingToBin(heading) {
   let h = ((heading % 360) + 360) % 360;
@@ -157,6 +161,24 @@ function headingToBin(heading) {
 
 function binToHeading(bin) {
   return bin * 10 + 5;
+}
+
+function playBeep() {
+  if (!audioContext) return;
+  const now = Date.now();
+  if (now - lastBeepTime < BEEP_COOLDOWN) return;
+  lastBeepTime = now;
+
+  const osc = audioContext.createOscillator();
+  const gain = audioContext.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(880, audioContext.currentTime);
+  gain.gain.setValueAtTime(0.3, audioContext.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.15);
+  osc.connect(gain);
+  gain.connect(audioContext.destination);
+  osc.start();
+  osc.stop(audioContext.currentTime + 0.15);
 }
 
 function drawCompass() {
@@ -168,7 +190,6 @@ function drawCompass() {
 
   ctx.clearRect(0, 0, w, h);
 
-  // Background circle
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
   ctx.fillStyle = '#111';
@@ -177,13 +198,12 @@ function drawCompass() {
   ctx.lineWidth = 2;
   ctx.stroke();
 
-  // Direction bars (from center outward, intensity by level)
   for (let i = 0; i < NUM_BINS; i++) {
     const level = directionLevels[i];
     const intensity = Math.min(1, level / Math.max(maxLevelEver, 1));
     if (intensity < 0.05) continue;
 
-    const angle = (i * 10 - 90) * Math.PI / 180; // -90 so 0 is up (North)
+    const angle = (i * 10 - 90) * Math.PI / 180;
     const len = r * intensity;
 
     ctx.beginPath();
@@ -194,7 +214,6 @@ function drawCompass() {
     ctx.stroke();
   }
 
-  // Strongest direction marker
   if (strongestBin >= 0) {
     const angle = (strongestBin * 10 - 90) * Math.PI / 180;
     ctx.beginPath();
@@ -204,20 +223,17 @@ function drawCompass() {
     ctx.lineWidth = 4;
     ctx.stroke();
 
-    // Arrow head
     ctx.beginPath();
     ctx.arc(cx + Math.cos(angle) * r * 0.85, cy + Math.sin(angle) * r * 0.85, 6, 0, Math.PI * 2);
     ctx.fillStyle = '#fbbf24';
     ctx.fill();
   }
 
-  // Center dot
   ctx.beginPath();
   ctx.arc(cx, cy, 6, 0, Math.PI * 2);
   ctx.fillStyle = '#fff';
   ctx.fill();
 
-  // Cardinal labels
   ctx.fillStyle = '#888';
   ctx.font = '12px system-ui';
   ctx.textAlign = 'center';
@@ -244,9 +260,7 @@ function updateDirectionLabel() {
   directionLabel.textContent = `Strongest: ${dir} (${deg}°)`;
 }
 
-// Device orientation
 function handleOrientation(e) {
-  // webkitCompassHeading is more reliable on iOS; alpha works elsewhere
   let heading = e.webkitCompassHeading != null ? e.webkitCompassHeading : (360 - (e.alpha || 0));
   currentHeading = heading;
 }
@@ -292,10 +306,10 @@ async function startListening() {
     dataArray = new Uint8Array(analyser.frequencyBinCount);
     microphone.connect(analyser);
 
-    // Reset direction data
     directionLevels = new Array(NUM_BINS).fill(0);
     maxLevelEver = 1;
     strongestBin = -1;
+    lastBeepTime = 0;
 
     isListening = true;
     startBtn.textContent = 'Stop Listening';
@@ -345,17 +359,13 @@ function detect() {
     }
   }
 
-  // Update visual meter
   const meterPercent = Math.min(100, (maxHigh / 255) * 100);
   meterBar.style.width = meterPercent + '%';
 
-  // Update direction map
   const bin = headingToBin(currentHeading);
-  // Decay old values slightly so recent peaks matter more
   directionLevels[bin] = Math.max(directionLevels[bin] * 0.92, maxHigh);
   if (maxHigh > maxLevelEver) maxLevelEver = maxHigh;
 
-  // Find strongest direction
   let best = 0;
   strongestBin = 0;
   for (let i = 0; i < NUM_BINS; i++) {
@@ -371,6 +381,7 @@ function detect() {
   if (maxHigh > thresholdAmp) {
     alertDiv.classList.add('show');
     if (navigator.vibrate) navigator.vibrate(80);
+    playBeep();
   } else {
     alertDiv.classList.remove('show');
   }
@@ -379,7 +390,6 @@ function detect() {
   animationId = requestAnimationFrame(detect);
 }
 
-// Initial draw
 drawCompass();
 </script>
 </body>
