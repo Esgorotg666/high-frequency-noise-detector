@@ -41,6 +41,20 @@
     font-size: 1rem;
     color: #aaa;
   }
+  #meter {
+    width: 100%;
+    height: 24px;
+    background: #222;
+    border-radius: 12px;
+    overflow: hidden;
+    margin: 12px 0;
+  }
+  #meterBar {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(to right, #22c55e, #eab308, #ef4444);
+    transition: width 0.05s linear;
+  }
   #alert {
     display: none;
     position: fixed;
@@ -62,12 +76,14 @@
   <h1>High Frequency Detector</h1>
 
   <div class="controls">
-    <label>Threshold Frequency: <span id="freqLabel">10000</span> Hz</label>
-    <input type="range" id="freqThreshold" min="2000" max="20000" value="10000" step="100">
+    <label>Threshold Frequency: <span id="freqLabel">8000</span> Hz</label>
+    <input type="range" id="freqThreshold" min="2000" max="20000" value="8000" step="100">
 
-    <label>Sensitivity (lower = more sensitive): <span id="ampLabel">40</span></label>
-    <input type="range" id="ampThreshold" min="10" max="200" value="40" step="1">
+    <label>Sensitivity (lower = more sensitive): <span id="ampLabel">25</span></label>
+    <input type="range" id="ampThreshold" min="5" max="200" value="25" step="1">
   </div>
+
+  <div id="meter"><div id="meterBar"></div></div>
 
   <button id="startBtn">Start Listening</button>
   <p id="status">Tap Start and allow microphone access</p>
@@ -82,6 +98,7 @@ const ampLabel = document.getElementById('ampLabel');
 const startBtn = document.getElementById('startBtn');
 const statusEl = document.getElementById('status');
 const alertDiv = document.getElementById('alert');
+const meterBar = document.getElementById('meterBar');
 
 freqSlider.oninput = () => freqLabel.textContent = freqSlider.value;
 ampSlider.oninput = () => ampLabel.textContent = ampSlider.value;
@@ -97,11 +114,20 @@ async function startListening() {
   if (isListening) return;
   try {
     audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, echoCancellation: false, noiseSuppression: false });
+    if (audioContext.state === 'suspended') {
+      await audioContext.resume();
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({ 
+      audio: { 
+        echoCancellation: false, 
+        noiseSuppression: false, 
+        autoGainControl: false 
+      } 
+    });
     microphone = audioContext.createMediaStreamSource(stream);
     analyser = audioContext.createAnalyser();
     analyser.fftSize = 2048;
-    analyser.smoothingTimeConstant = 0.3;
+    analyser.smoothingTimeConstant = 0.2;
     dataArray = new Uint8Array(analyser.frequencyBinCount);
     microphone.connect(analyser);
 
@@ -125,6 +151,7 @@ function stopListening() {
   startBtn.classList.remove('listening');
   statusEl.textContent = 'Stopped';
   alertDiv.classList.remove('show');
+  meterBar.style.width = '0%';
   if (animationId) cancelAnimationFrame(animationId);
 }
 
@@ -151,14 +178,18 @@ function detect() {
     }
   }
 
+  // Update visual meter (0-255 scale)
+  const meterPercent = Math.min(100, (maxHigh / 255) * 100);
+  meterBar.style.width = meterPercent + '%';
+
   if (maxHigh > thresholdAmp) {
     alertDiv.classList.add('show');
-    if (navigator.vibrate) navigator.vibrate(150);
+    if (navigator.vibrate) navigator.vibrate(100);
   } else {
     alertDiv.classList.remove('show');
   }
 
-  statusEl.textContent = `Listening… peak high-freq: ${maxHigh}`;
+  statusEl.textContent = `Listening… peak: ${maxHigh} | threshold: ${thresholdAmp}`;
   animationId = requestAnimationFrame(detect);
 }
 </script>
