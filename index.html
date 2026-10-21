@@ -15,39 +15,39 @@
     text-align: center;
     min-height: 100vh;
   }
-  h1 { font-size: 1.6rem; margin: 12px 0; }
+  h1 { font-size: 1.5rem; margin: 8px 0; }
   .controls {
     background: #1a1a1a;
     border-radius: 12px;
-    padding: 16px;
-    margin: 12px 0;
+    padding: 12px;
+    margin: 8px 0;
   }
-  label { display: block; margin: 8px 0 4px; font-size: 0.95rem; }
-  input[type="range"] { width: 100%; margin: 6px 0; }
+  label { display: block; margin: 6px 0 2px; font-size: 0.9rem; }
+  input[type="range"] { width: 100%; margin: 4px 0; }
   button {
     width: 100%;
-    padding: 16px;
-    font-size: 1.2rem;
+    padding: 14px;
+    font-size: 1.1rem;
     font-weight: 600;
     background: #22c55e;
     color: #000;
     border: none;
     border-radius: 12px;
-    margin: 12px 0;
+    margin: 8px 0;
   }
   button.listening { background: #ef4444; color: #fff; }
   #status {
-    margin: 10px 0;
-    font-size: 1rem;
+    margin: 8px 0;
+    font-size: 0.95rem;
     color: #aaa;
   }
   #meter {
     width: 100%;
-    height: 24px;
+    height: 20px;
     background: #222;
-    border-radius: 12px;
+    border-radius: 10px;
     overflow: hidden;
-    margin: 12px 0;
+    margin: 8px 0;
   }
   #meterBar {
     height: 100%;
@@ -55,13 +55,34 @@
     background: linear-gradient(to right, #22c55e, #eab308, #ef4444);
     transition: width 0.05s linear;
   }
+  #compass {
+    width: 280px;
+    height: 280px;
+    margin: 12px auto;
+    position: relative;
+    background: radial-gradient(circle, #111 0%, #000 70%);
+    border: 3px solid #333;
+    border-radius: 50%;
+    overflow: hidden;
+  }
+  #compass canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  #directionLabel {
+    font-size: 1.3rem;
+    font-weight: 700;
+    margin: 6px 0;
+    color: #fbbf24;
+  }
   #alert {
     display: none;
     position: fixed;
     inset: 0;
     background: #dc2626;
     color: white;
-    font-size: 2.4rem;
+    font-size: 2.2rem;
     font-weight: 800;
     align-items: center;
     justify-content: center;
@@ -70,10 +91,16 @@
     padding: 20px;
   }
   #alert.show { display: flex; }
+  .instructions {
+    font-size: 0.85rem;
+    color: #888;
+    margin: 4px 0 8px;
+  }
 </style>
 </head>
 <body>
-  <h1>High Frequency Detector</h1>
+  <h1>High Frequency Direction Finder</h1>
+  <p class="instructions">Slowly rotate your phone in a full circle while listening. The compass shows where the noise is strongest.</p>
 
   <div class="controls">
     <label>Threshold Frequency: <span id="freqLabel">8000</span> Hz</label>
@@ -85,8 +112,11 @@
 
   <div id="meter"><div id="meterBar"></div></div>
 
+  <div id="compass"><canvas id="compassCanvas" width="280" height="280"></canvas></div>
+  <div id="directionLabel">Rotate phone to scan</div>
+
   <button id="startBtn">Start Listening</button>
-  <p id="status">Tap Start and allow microphone access</p>
+  <p id="status">Tap Start → allow mic + motion/orientation</p>
 
   <div id="alert">⚠️ HIGH FREQUENCY<br>NOISE DETECTED</div>
 
@@ -99,6 +129,9 @@ const startBtn = document.getElementById('startBtn');
 const statusEl = document.getElementById('status');
 const alertDiv = document.getElementById('alert');
 const meterBar = document.getElementById('meterBar');
+const compassCanvas = document.getElementById('compassCanvas');
+const directionLabel = document.getElementById('directionLabel');
+const ctx = compassCanvas.getContext('2d');
 
 freqSlider.oninput = () => freqLabel.textContent = freqSlider.value;
 ampSlider.oninput = () => ampLabel.textContent = ampSlider.value;
@@ -110,9 +143,137 @@ let dataArray = null;
 let isListening = false;
 let animationId = null;
 
+// Direction finding data
+const NUM_BINS = 36; // 10 degree bins
+let directionLevels = new Array(NUM_BINS).fill(0);
+let maxLevelEver = 1;
+let currentHeading = 0;
+let strongestBin = -1;
+
+function headingToBin(heading) {
+  let h = ((heading % 360) + 360) % 360;
+  return Math.floor(h / 10) % NUM_BINS;
+}
+
+function binToHeading(bin) {
+  return bin * 10 + 5;
+}
+
+function drawCompass() {
+  const w = compassCanvas.width;
+  const h = compassCanvas.height;
+  const cx = w / 2;
+  const cy = h / 2;
+  const r = Math.min(cx, cy) - 10;
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Background circle
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fillStyle = '#111';
+  ctx.fill();
+  ctx.strokeStyle = '#444';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Direction bars (from center outward, intensity by level)
+  for (let i = 0; i < NUM_BINS; i++) {
+    const level = directionLevels[i];
+    const intensity = Math.min(1, level / Math.max(maxLevelEver, 1));
+    if (intensity < 0.05) continue;
+
+    const angle = (i * 10 - 90) * Math.PI / 180; // -90 so 0 is up (North)
+    const len = r * intensity;
+
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(angle) * len, cy + Math.sin(angle) * len);
+    ctx.strokeStyle = `rgba(239, 68, 68, ${0.4 + intensity * 0.6})`;
+    ctx.lineWidth = 8;
+    ctx.stroke();
+  }
+
+  // Strongest direction marker
+  if (strongestBin >= 0) {
+    const angle = (strongestBin * 10 - 90) * Math.PI / 180;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(angle) * r * 0.95, cy + Math.sin(angle) * r * 0.95);
+    ctx.strokeStyle = '#fbbf24';
+    ctx.lineWidth = 4;
+    ctx.stroke();
+
+    // Arrow head
+    ctx.beginPath();
+    ctx.arc(cx + Math.cos(angle) * r * 0.85, cy + Math.sin(angle) * r * 0.85, 6, 0, Math.PI * 2);
+    ctx.fillStyle = '#fbbf24';
+    ctx.fill();
+  }
+
+  // Center dot
+  ctx.beginPath();
+  ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+  ctx.fillStyle = '#fff';
+  ctx.fill();
+
+  // Cardinal labels
+  ctx.fillStyle = '#888';
+  ctx.font = '12px system-ui';
+  ctx.textAlign = 'center';
+  ctx.fillText('N', cx, cy - r + 18);
+  ctx.fillText('E', cx + r - 18, cy + 4);
+  ctx.fillText('S', cx, cy + r - 8);
+  ctx.fillText('W', cx - r + 18, cy + 4);
+}
+
+function updateDirectionLabel() {
+  if (strongestBin < 0) {
+    directionLabel.textContent = 'Rotate phone to scan';
+    return;
+  }
+  const deg = binToHeading(strongestBin);
+  let dir = 'N';
+  if (deg >= 22.5 && deg < 67.5) dir = 'NE';
+  else if (deg >= 67.5 && deg < 112.5) dir = 'E';
+  else if (deg >= 112.5 && deg < 157.5) dir = 'SE';
+  else if (deg >= 157.5 && deg < 202.5) dir = 'S';
+  else if (deg >= 202.5 && deg < 247.5) dir = 'SW';
+  else if (deg >= 247.5 && deg < 292.5) dir = 'W';
+  else if (deg >= 292.5 && deg < 337.5) dir = 'NW';
+  directionLabel.textContent = `Strongest: ${dir} (${deg}°)`;
+}
+
+// Device orientation
+function handleOrientation(e) {
+  // webkitCompassHeading is more reliable on iOS; alpha works elsewhere
+  let heading = e.webkitCompassHeading != null ? e.webkitCompassHeading : (360 - (e.alpha || 0));
+  currentHeading = heading;
+}
+
+async function requestOrientationPermission() {
+  if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    try {
+      const response = await DeviceOrientationEvent.requestPermission();
+      if (response === 'granted') {
+        window.addEventListener('deviceorientation', handleOrientation);
+        return true;
+      }
+    } catch (err) {
+      console.warn('Orientation permission error', err);
+    }
+    return false;
+  } else {
+    window.addEventListener('deviceorientation', handleOrientation);
+    return true;
+  }
+}
+
 async function startListening() {
   if (isListening) return;
   try {
+    await requestOrientationPermission();
+
     audioContext = new (window.AudioContext || window.webkitAudioContext)();
     if (audioContext.state === 'suspended') {
       await audioContext.resume();
@@ -127,17 +288,22 @@ async function startListening() {
     microphone = audioContext.createMediaStreamSource(stream);
     analyser = audioContext.createAnalyser();
     analyser.fftSize = 2048;
-    analyser.smoothingTimeConstant = 0.2;
+    analyser.smoothingTimeConstant = 0.15;
     dataArray = new Uint8Array(analyser.frequencyBinCount);
     microphone.connect(analyser);
+
+    // Reset direction data
+    directionLevels = new Array(NUM_BINS).fill(0);
+    maxLevelEver = 1;
+    strongestBin = -1;
 
     isListening = true;
     startBtn.textContent = 'Stop Listening';
     startBtn.classList.add('listening');
-    statusEl.textContent = 'Listening…';
+    statusEl.textContent = 'Listening — slowly rotate phone';
     detect();
   } catch (err) {
-    statusEl.textContent = 'Microphone error: ' + (err.message || err);
+    statusEl.textContent = 'Error: ' + (err.message || err);
   }
 }
 
@@ -153,6 +319,7 @@ function stopListening() {
   alertDiv.classList.remove('show');
   meterBar.style.width = '0%';
   if (animationId) cancelAnimationFrame(animationId);
+  drawCompass();
 }
 
 startBtn.onclick = () => isListening ? stopListening() : startListening();
@@ -178,20 +345,42 @@ function detect() {
     }
   }
 
-  // Update visual meter (0-255 scale)
+  // Update visual meter
   const meterPercent = Math.min(100, (maxHigh / 255) * 100);
   meterBar.style.width = meterPercent + '%';
 
+  // Update direction map
+  const bin = headingToBin(currentHeading);
+  // Decay old values slightly so recent peaks matter more
+  directionLevels[bin] = Math.max(directionLevels[bin] * 0.92, maxHigh);
+  if (maxHigh > maxLevelEver) maxLevelEver = maxHigh;
+
+  // Find strongest direction
+  let best = 0;
+  strongestBin = 0;
+  for (let i = 0; i < NUM_BINS; i++) {
+    if (directionLevels[i] > best) {
+      best = directionLevels[i];
+      strongestBin = i;
+    }
+  }
+
+  drawCompass();
+  updateDirectionLabel();
+
   if (maxHigh > thresholdAmp) {
     alertDiv.classList.add('show');
-    if (navigator.vibrate) navigator.vibrate(100);
+    if (navigator.vibrate) navigator.vibrate(80);
   } else {
     alertDiv.classList.remove('show');
   }
 
-  statusEl.textContent = `Listening… peak: ${maxHigh} | threshold: ${thresholdAmp}`;
+  statusEl.textContent = `Peak: ${maxHigh} | Heading: ${Math.round(currentHeading)}°`;
   animationId = requestAnimationFrame(detect);
 }
+
+// Initial draw
+drawCompass();
 </script>
 </body>
 </html>
