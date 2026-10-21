@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>High Frequency Noise Detector</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: #0a0a0a;
+    color: #fff;
+    text-align: center;
+    min-height: 100vh;
+  }
+  h1 { font-size: 1.6rem; margin: 12px 0; }
+  .controls {
+    background: #1a1a1a;
+    border-radius: 12px;
+    padding: 16px;
+    margin: 12px 0;
+  }
+  label { display: block; margin: 8px 0 4px; font-size: 0.95rem; }
+  input[type="range"] { width: 100%; margin: 6px 0; }
+  button {
+    width: 100%;
+    padding: 16px;
+    font-size: 1.2rem;
+    font-weight: 600;
+    background: #22c55e;
+    color: #000;
+    border: none;
+    border-radius: 12px;
+    margin: 12px 0;
+  }
+  button.listening { background: #ef4444; color: #fff; }
+  #status {
+    margin: 10px 0;
+    font-size: 1rem;
+    color: #aaa;
+  }
+  #alert {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: #dc2626;
+    color: white;
+    font-size: 2.4rem;
+    font-weight: 800;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    z-index: 999;
+    padding: 20px;
+  }
+  #alert.show { display: flex; }
+</style>
+</head>
+<body>
+  <h1>High Frequency Detector</h1>
+
+  <div class="controls">
+    <label>Threshold Frequency: <span id="freqLabel">10000</span> Hz</label>
+    <input type="range" id="freqThreshold" min="2000" max="20000" value="10000" step="100">
+
+    <label>Sensitivity (lower = more sensitive): <span id="ampLabel">40</span></label>
+    <input type="range" id="ampThreshold" min="10" max="200" value="40" step="1">
+  </div>
+
+  <button id="startBtn">Start Listening</button>
+  <p id="status">Tap Start and allow microphone access</p>
+
+  <div id="alert">⚠️ HIGH FREQUENCY<br>NOISE DETECTED</div>
+
+<script>
+const freqSlider = document.getElementById('freqThreshold');
+const ampSlider = document.getElementById('ampThreshold');
+const freqLabel = document.getElementById('freqLabel');
+const ampLabel = document.getElementById('ampLabel');
+const startBtn = document.getElementById('startBtn');
+const statusEl = document.getElementById('status');
+const alertDiv = document.getElementById('alert');
+
+freqSlider.oninput = () => freqLabel.textContent = freqSlider.value;
+ampSlider.oninput = () => ampLabel.textContent = ampSlider.value;
+
+let audioContext = null;
+let analyser = null;
+let microphone = null;
+let dataArray = null;
+let isListening = false;
+let animationId = null;
+
+async function startListening() {
+  if (isListening) return;
+  try {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, echoCancellation: false, noiseSuppression: false });
+    microphone = audioContext.createMediaStreamSource(stream);
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.3;
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+    microphone.connect(analyser);
+
+    isListening = true;
+    startBtn.textContent = 'Stop Listening';
+    startBtn.classList.add('listening');
+    statusEl.textContent = 'Listening…';
+    detect();
+  } catch (err) {
+    statusEl.textContent = 'Microphone error: ' + (err.message || err);
+  }
+}
+
+function stopListening() {
+  if (audioContext) {
+    audioContext.close();
+    audioContext = null;
+  }
+  isListening = false;
+  startBtn.textContent = 'Start Listening';
+  startBtn.classList.remove('listening');
+  statusEl.textContent = 'Stopped';
+  alertDiv.classList.remove('show');
+  if (animationId) cancelAnimationFrame(animationId);
+}
+
+startBtn.onclick = () => isListening ? stopListening() : startListening();
+
+function detect() {
+  if (!isListening || !analyser) return;
+
+  analyser.getByteFrequencyData(dataArray);
+
+  const sampleRate = audioContext.sampleRate || 48000;
+  const nyquist = sampleRate / 2;
+  const binCount = analyser.frequencyBinCount;
+  const freqRes = nyquist / binCount;
+
+  const thresholdFreq = parseInt(freqSlider.value, 10);
+  const thresholdAmp = parseInt(ampSlider.value, 10);
+
+  let maxHigh = 0;
+  for (let i = 0; i < binCount; i++) {
+    const freq = i * freqRes;
+    if (freq >= thresholdFreq) {
+      if (dataArray[i] > maxHigh) maxHigh = dataArray[i];
+    }
+  }
+
+  if (maxHigh > thresholdAmp) {
+    alertDiv.classList.add('show');
+    if (navigator.vibrate) navigator.vibrate(150);
+  } else {
+    alertDiv.classList.remove('show');
+  }
+
+  statusEl.textContent = `Listening… peak high-freq: ${maxHigh}`;
+  animationId = requestAnimationFrame(detect);
+}
+</script>
+</body>
+</html>
