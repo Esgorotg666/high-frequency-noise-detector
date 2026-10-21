@@ -129,14 +129,14 @@
 </head>
 <body>
   <h1>High Frequency Direction Finder</h1>
-  <p class="instructions">Slowly rotate your phone in a full circle while listening. The compass shows where the noise is strongest. Beeps and logs every detection.</p>
+  <p class="instructions">Picks up high-frequency noise and slight clicks. Slowly rotate your phone to find the direction. Beeps and logs every detection.</p>
 
   <div class="controls">
-    <label>Threshold Frequency: <span id="freqLabel">8000</span> Hz</label>
-    <input type="range" id="freqThreshold" min="2000" max="20000" value="8000" step="100">
+    <label>Threshold Frequency: <span id="freqLabel">6000</span> Hz</label>
+    <input type="range" id="freqThreshold" min="2000" max="20000" value="6000" step="100">
 
-    <label>Sensitivity (lower = more sensitive): <span id="ampLabel">25</span></label>
-    <input type="range" id="ampThreshold" min="5" max="200" value="25" step="1">
+    <label>Sensitivity (lower = more sensitive to clicks): <span id="ampLabel">12</span></label>
+    <input type="range" id="ampThreshold" min="3" max="200" value="12" step="1">
   </div>
 
   <div id="meter"><div id="meterBar"></div></div>
@@ -153,7 +153,7 @@
     <button class="secondary" id="clearHistory">Clear History</button>
   </div>
 
-  <div id="alert">⚠️ HIGH FREQUENCY<br>NOISE DETECTED</div>
+  <div id="alert">⚠️ HIGH FREQUENCY / CLICK<br>DETECTED</div>
 
 <script>
 const freqSlider = document.getElementById('freqThreshold');
@@ -180,7 +180,7 @@ let dataArray = null;
 let isListening = false;
 let animationId = null;
 
-const NUM_BINS = 72; // 5 degree resolution for better accuracy
+const NUM_BINS = 72;
 let directionLevels = new Array(NUM_BINS).fill(0);
 let maxLevelEver = 1;
 let currentHeading = 0;
@@ -189,11 +189,13 @@ let strongestBin = -1;
 let headingInitialized = false;
 
 let lastBeepTime = 0;
-const BEEP_COOLDOWN = 600;
+const BEEP_COOLDOWN = 400;
 
 let wasAboveThreshold = false;
 let lastLogTime = 0;
-const LOG_COOLDOWN = 1500;
+const LOG_COOLDOWN = 800;
+
+let prevMaxHigh = 0;
 
 let alertHistory = JSON.parse(localStorage.getItem('hfAlertHistory') || '[]');
 
@@ -260,7 +262,6 @@ function smoothHeading(newHeading) {
     headingInitialized = true;
     return smoothedHeading;
   }
-  // Circular smoothing to handle 0/360 wrap
   let diff = newHeading - smoothedHeading;
   if (diff > 180) diff -= 360;
   if (diff < -180) diff += 360;
@@ -277,13 +278,13 @@ function playBeep() {
   const osc = audioContext.createOscillator();
   const gain = audioContext.createGain();
   osc.type = 'sine';
-  osc.frequency.setValueAtTime(880, audioContext.currentTime);
-  gain.gain.setValueAtTime(0.3, audioContext.currentTime);
-  gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.15);
+  osc.frequency.setValueAtTime(1000, audioContext.currentTime);
+  gain.gain.setValueAtTime(0.35, audioContext.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.12);
   osc.connect(gain);
   gain.connect(audioContext.destination);
   osc.start();
-  osc.stop(audioContext.currentTime + 0.15);
+  osc.stop(audioContext.currentTime + 0.12);
 }
 
 function drawCompass() {
@@ -306,7 +307,7 @@ function drawCompass() {
   for (let i = 0; i < NUM_BINS; i++) {
     const level = directionLevels[i];
     const intensity = Math.min(1, level / Math.max(maxLevelEver, 1));
-    if (intensity < 0.08) continue;
+    if (intensity < 0.06) continue;
 
     const angle = (i * 5 - 90) * Math.PI / 180;
     const len = r * intensity;
@@ -319,7 +320,7 @@ function drawCompass() {
     ctx.stroke();
   }
 
-  if (strongestBin >= 0 && maxLevelEver > 10) {
+  if (strongestBin >= 0 && maxLevelEver > 8) {
     const angle = (strongestBin * 5 - 90) * Math.PI / 180;
     ctx.beginPath();
     ctx.moveTo(cx, cy);
@@ -349,7 +350,7 @@ function drawCompass() {
 }
 
 function updateDirectionLabel() {
-  if (strongestBin < 0 || maxLevelEver < 10) {
+  if (strongestBin < 0 || maxLevelEver < 8) {
     directionLabel.textContent = 'Rotate phone to scan';
     return;
   }
@@ -407,7 +408,7 @@ async function startListening() {
     microphone = audioContext.createMediaStreamSource(stream);
     analyser = audioContext.createAnalyser();
     analyser.fftSize = 2048;
-    analyser.smoothingTimeConstant = 0.15;
+    analyser.smoothingTimeConstant = 0.05; // faster response for clicks
     dataArray = new Uint8Array(analyser.frequencyBinCount);
     microphone.connect(analyser);
 
@@ -417,11 +418,12 @@ async function startListening() {
     headingInitialized = false;
     lastBeepTime = 0;
     wasAboveThreshold = false;
+    prevMaxHigh = 0;
 
     isListening = true;
     startBtn.textContent = 'Stop Listening';
     startBtn.classList.add('listening');
-    statusEl.textContent = 'Listening — slowly rotate phone';
+    statusEl.textContent = 'Listening — sensitive to clicks';
     detect();
   } catch (err) {
     statusEl.textContent = 'Error: ' + (err.message || err);
@@ -470,13 +472,11 @@ function detect() {
   meterBar.style.width = meterPercent + '%';
 
   const bin = headingToBin(currentHeading);
-  // Faster decay so recent readings dominate for better accuracy
-  directionLevels[bin] = Math.max(directionLevels[bin] * 0.85, maxHigh);
+  directionLevels[bin] = Math.max(directionLevels[bin] * 0.8, maxHigh);
   if (maxHigh > maxLevelEver) maxLevelEver = maxHigh;
 
-  // Mild decay on all bins so old data fades
   for (let i = 0; i < NUM_BINS; i++) {
-    if (i !== bin) directionLevels[i] *= 0.995;
+    if (i !== bin) directionLevels[i] *= 0.992;
   }
 
   let best = 0;
@@ -491,11 +491,14 @@ function detect() {
   drawCompass();
   updateDirectionLabel();
 
-  const isAbove = maxHigh > thresholdAmp;
+  // Detect both sustained high-freq and sudden clicks (spikes)
+  const spike = maxHigh - prevMaxHigh;
+  const isClick = spike > (thresholdAmp * 0.6) && maxHigh > 8;
+  const isAbove = maxHigh > thresholdAmp || isClick;
 
   if (isAbove) {
     alertDiv.classList.add('show');
-    if (navigator.vibrate) navigator.vibrate(80);
+    if (navigator.vibrate) navigator.vibrate(60);
     playBeep();
 
     if (!wasAboveThreshold || (Date.now() - lastLogTime >= LOG_COOLDOWN)) {
@@ -506,6 +509,7 @@ function detect() {
   }
 
   wasAboveThreshold = isAbove;
+  prevMaxHigh = maxHigh * 0.7; // slow decay of previous peak
 
   statusEl.textContent = `Peak: ${maxHigh} | Heading: ${Math.round(currentHeading)}°`;
   animationId = requestAnimationFrame(detect);
